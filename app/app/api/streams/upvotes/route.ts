@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import {primaClient} from "../../../lib/db"
+import {prismaClient} from "../../../lib/db"
 import { getServerSession } from "next-auth";
 
 
@@ -20,7 +20,7 @@ export async function POST(req : NextRequest ){
         })
     }
 
-    const user = await primaClient.User.findFirst({
+    const user = await prismaClient.user.findFirst({
         where : {
             email : session.user.email
         }
@@ -36,9 +36,11 @@ export async function POST(req : NextRequest ){
 
    try{
         const data = upvoteSchema.parse(await req.json());
-        await primaClient.UpVotes.create({
-            userId : user.id, 
-            streamId : data.streamId , 
+        await prismaClient.upVotes.create({
+            data : {
+                userId : user.id, 
+                streamId : data.streamId , 
+            }
 
         })
    }catch(error){
