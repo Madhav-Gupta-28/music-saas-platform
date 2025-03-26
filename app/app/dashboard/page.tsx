@@ -7,14 +7,19 @@ import { Card, CardContent } from "@/components/ui/card"
 import { ThumbsUp, ThumbsDown, Play } from "lucide-react"
 import { YouTubeEmbed } from "./youtube-embed"
 import axios from "axios"
+import {getServerSession} from "next-auth"
+import { NextRequest, NextResponse } from "next/server";
+import { prismaClient } from "../lib/db"
 
 // Type for a song in the queue
 type Song = {
+  streamId : string
   id: string
   url: string
   title: string
   thumbnail: string
   votes: number
+  hasUpvoted : boolean
 }
 
 const REFRESH_INTERVAL_MS = 10000;
@@ -34,17 +39,37 @@ export default function Dashboard() {
   }
 
   const refreshStreams = async () => {
+    try {
       const res = await fetch("/api/streams/my", {
-        credentials : "include"
-      })
-      // console.log(res.data)
-  }
+        credentials: "include"
+      });
+      const data = await res.json();
+      
+      if (data.streams) {
+        // Transform the streams data into our Song format
+        const transformedStreams: Song[] = data.streams.map((stream: any) => ({
+          streamId : stream.id,
+          id: stream.extractedId,
+          url: stream.url,
+          title: stream.title,
+          thumbnail: stream.smallImage,
+          votes: stream.upvotesCount || 0,
+          hasUpvoted: stream.hasUpvoted || false
+        }));
 
+        // Update the queue with the transformed streams
+        setQueue(transformedStreams);
+      }
+    } catch (error) {
+      console.error("Error fetching streams:", error);
+    }
+  };
 
   useEffect(() => {
-     refreshStreams();
-    const interval = setInterval(() => {} , REFRESH_INTERVAL_MS)
-  },[])
+    refreshStreams();
+    const interval = setInterval(refreshStreams, REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, []);
 
   // Validate URL and fetch preview data
   useEffect(() => {
@@ -64,39 +89,118 @@ export default function Dashboard() {
   }, [url])
 
   // Add song to queue
-  const addToQueue = () => {
-    if (!isValidUrl || !previewData) return
+  const addToQueue = async () => {
+    try {
+      if (!isValidUrl || !previewData) return
 
-    const videoId = extractVideoId(url)
-    if (!videoId) return
+      const videoId = extractVideoId(url)
+      if (!videoId) return
 
-    const newSong: Song = {
-      id: videoId,
-      url,
-      title: previewData.title,
-      thumbnail: previewData.thumbnail,
-      votes: 0,
-    }
+      // Create stream in database
+      const response = await fetch("/api/streams", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: url
+        }),
+        credentials: "include" // This ensures cookies are sent with the request
+      });
 
-    setQueue([...queue, newSong])
-    setUrl("")
-    setPreviewData(null)
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || "Failed to add stream to database");
+      }
 
-    // If no song is currently playing, play this one
-    if (!currentSong) {
-      setCurrentSong(newSong)
-      setQueue((prev) => prev.filter((song) => song.id !== videoId))
+      const data = await response.json();
+      
+      // Create new song object with the database stream ID
+      const newSong: Song = {
+        streamId: data.id,
+        id: videoId,
+        url,
+        title: previewData.title,
+        thumbnail: previewData.thumbnail,
+        votes: 0,
+        hasUpvoted: false
+      }
+
+      // Update local state
+      setQueue([...queue, newSong])
+      setUrl("")
+      setPreviewData(null)
+
+      // If no song is currently playing, play this one
+      if (!currentSong) {
+        setCurrentSong(newSong)
+        setQueue((prev) => prev.filter((song) => song.streamId !== newSong.streamId))
+      }
+
+      // Refresh streams to get the latest state
+      await refreshStreams();
+    } catch (error) {
+      console.error("Error adding stream:", error);
+      // You might want to show an error message to the user here
     }
   }
 
   // Vote for a song
-  const vote = (id: string, amount: number) => {
-    setQueue((prev) =>
-      prev
-        .map((song) => (song.id === id ? { ...song, votes: song.votes + amount } : song))
-        .sort((a, b) => b.votes - a.votes),
-    )
-  }
+  const vote = async (streamId: string, isUpvote: boolean) => {
+    try {
+      // Update local state first
+      setQueue((prev) => {
+        const updatedQueue = prev.map((song) => {
+          if (song.streamId === streamId) {
+            return {
+              ...song,
+              votes: song.votes + (isUpvote ? 1 : -1),
+              hasUpvoted: isUpvote
+            };
+          }
+          return song;
+        });
+        
+        // Sort queue based on votes
+        return updatedQueue.sort((a, b) => b.votes - a.votes);
+      });
+
+      // Call the appropriate endpoint based on vote type
+      const endpoint = isUpvote ? "/api/streams/upvotes" : "/api/streams/downvotes";
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          streamId: streamId
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to ${isUpvote ? 'upvote' : 'downvote'}`);
+      }
+
+      // Refresh the streams to get the latest state from the database
+      await refreshStreams();
+    } catch (error) {
+      console.error("Error voting:", error);
+      // Revert local state on error
+      setQueue((prev) => {
+        const updatedQueue = prev.map((song) => {
+          if (song.streamId === streamId) {
+            return {
+              ...song,
+              votes: song.votes + (isUpvote ? -1 : 1),
+              hasUpvoted: !isUpvote
+            };
+          }
+          return song;
+        });
+        return updatedQueue.sort((a, b) => b.votes - a.votes);
+      });
+    }
+  };
 
   // Play next song
   const playNext = () => {
@@ -108,7 +212,7 @@ export default function Dashboard() {
     // Sort by votes and take the highest
     const sortedQueue = [...queue].sort((a, b) => b.votes - a.votes)
     setCurrentSong(sortedQueue[0])
-    setQueue((prev) => prev.filter((song) => song.id !== sortedQueue[0].id))
+    setQueue((prev) => prev.filter((song) => song.streamId !== sortedQueue[0].streamId))
   }
 
   return (
@@ -181,7 +285,7 @@ export default function Dashboard() {
             ) : (
               <div className="space-y-3">
                 {queue.map((song) => (
-                  <Card key={song.id}>
+                  <Card key={song.streamId}>
                     <CardContent className="p-3">
                       <div className="flex gap-3">
                         <img
@@ -192,20 +296,35 @@ export default function Dashboard() {
                         <div className="flex-1 min-w-0">
                           <p className="font-medium truncate">{song.title}</p>
                           <div className="flex items-center gap-2 mt-2">
-                            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => vote(song.id, 1)}>
-                              <ThumbsUp className="h-4 w-4" />
-                            </Button>
+                            {
+                              song.hasUpvoted ? (
+                                <Button 
+                                  variant="outline" 
+                                  size="icon" 
+                                  className="h-8 w-8" 
+                                  onClick={() => vote(song.streamId, false)}
+                                >
+                                  <ThumbsDown className="h-4 w-4" />
+                                </Button>
+                              ) : (
+                                <Button 
+                                  variant="outline" 
+                                  size="icon" 
+                                  className="h-8 w-8" 
+                                  onClick={() => vote(song.streamId, true)}
+                                >
+                                  <ThumbsUp className="h-4 w-4" />
+                                </Button>
+                              )
+                            }
                             <span className="font-bold">{song.votes}</span>
-                            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => vote(song.id, -1)}>
-                              <ThumbsDown className="h-4 w-4" />
-                            </Button>
                             <Button
                               variant="ghost"
                               size="sm"
                               className="ml-auto"
                               onClick={() => {
                                 setCurrentSong(song)
-                                setQueue((prev) => prev.filter((s) => s.id !== song.id))
+                                setQueue((prev) => prev.filter((s) => s.streamId !== song.streamId))
                               }}
                             >
                               <Play className="h-4 w-4 mr-1" /> Play Now

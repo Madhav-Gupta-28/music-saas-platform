@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import {primaClient} from "../../../lib/db"
+import {prismaClient} from "../../../lib/db"
 import { getServerSession } from "next-auth";
 
 
@@ -20,7 +20,7 @@ export async function POST(req : NextRequest ){
         })
     }
 
-    const user = await primaClient.User.findFirst({
+    const user = await prismaClient.user.findFirst({
         where : {
             email : session.user.email
         }
@@ -36,16 +36,24 @@ export async function POST(req : NextRequest ){
 
    try{
         const data = upvoteSchema.parse(await req.json());
-        await primaClient.UpVotes.delete({
+        await prismaClient.upVotes.delete({
             where : {
-                streamId : data.streamId,
-                userId : user.id
-            }
+                streamId_userId : {
+                    streamId : data.streamId,
+                    userId : user.id
+                }
+            }   
 
+        })
+
+        return NextResponse.json({
+            message : "Downvoted successfully"
+        },{
+            status : 200
         })
    }catch(error){
         return NextResponse.json({
-            message : "Error while upvoting"
+            message : "Error while downvoting"
         },{
             status: 403
         })

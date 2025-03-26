@@ -35,12 +35,28 @@ export async function GET(req: NextRequest) {
         const streams = await prisma.stream.findMany({
             where: {
                 userId: user.id
+            } , 
+            include :{
+                _count : {
+                    select :{
+                        upvotes : true 
+                    } 
+            }  , 
+            upvotes :{
+                where :{
+                    userId : user.id
+                }
+            }
             }
         });
 
         return NextResponse.json({
             message: "Streams fetched successfully",
-            streams: streams
+            streams: streams.map((stream) => ({
+                ...stream,
+                upvotesCount: stream._count.upvotes , 
+                hasUpvoted : stream.upvotes.length ? true : false
+            }))
         });
     } catch (error) {
         console.error("Error fetching streams:", error);

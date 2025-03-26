@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod"
 import { prismaClient } from "../../lib/db"
+import { getServerSession } from "next-auth/next"
 
 // @ts-ignore
 import youtubesearchapi from "youtube-search-api"
@@ -8,12 +9,33 @@ import youtubesearchapi from "youtube-search-api"
 const YT_REGEX = /^(?:https?:\/\/)?(?:www\.)?(?:m\.)?(?:youtube\.com\/(?:watch\?(?!.*\blist=)(?:.*&)?v=|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})(?:[?&]\S+)?$/;
 
 const createStreamSchema = z.object({
-    createrId: z.string(),
     url: z.string()
 })
 
 export async function POST(req: NextRequest) { 
     try {
+        const session = await getServerSession();
+        
+        if (!session?.user?.email) {
+            return NextResponse.json(
+                { message: "Unauthenticated" },
+                { status: 403 }
+            );
+        }
+
+        const user = await prismaClient.user.findFirst({
+            where: {
+                email: session.user.email
+            }
+        });
+
+        if (!user) {
+            return NextResponse.json(
+                { message: "User not found" },
+                { status: 403 }
+            );
+        }
+
         const data = createStreamSchema.parse(await req.json())
         const isYt = data.url.match(YT_REGEX);
         const videoId = data.url ? data.url.match(YT_REGEX)?.[1] : null;
@@ -28,7 +50,6 @@ export async function POST(req: NextRequest) {
           );
         }
     
-
         const extractedId = data.url.split("?v=")[1];
 
         const res = await youtubesearchapi.GetVideoDetails(extractedId);
@@ -38,18 +59,16 @@ export async function POST(req: NextRequest) {
 
         thumbnail.sort((a: {width: number}, b: {width: number}) => a.width < b.width ? -1 : 1)
 
-
         const stream = await prismaClient.stream.create({
             data: {
-                userId: data.createrId, 
-                url : data.url , 
-                type : "Youtube",
-                title : title ?? " Can't find Video" ,
-                extractedId : extractedId,
-                bigImage : (thumbnail[thumbnail.length - 1 ].url  ) ?? "", 
-                smallImage  : (thumbnail.length > 1 ? thumbnail[thumbnail.length - 2  ].url :   thumbnail[thumbnail.length - 1 ].url) ?? "",
-                // upvotes: 0 , 
-                active : true
+                userId: user.id,
+                url: data.url, 
+                type: "Youtube",
+                title: title ?? "Can't find Video",
+                extractedId: extractedId,
+                bigImage: (thumbnail[thumbnail.length - 1].url) ?? "", 
+                smallImage: (thumbnail.length > 1 ? thumbnail[thumbnail.length - 2].url : thumbnail[thumbnail.length - 1].url) ?? "",
+                active: true
             }
         })
 
